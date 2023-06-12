@@ -1,8 +1,9 @@
-import requests
 import json
+import requests
 from bs4 import BeautifulSoup
 import logging
 import re
+from urllib.parse import urlparse, parse_qs
 
 
 class MissingUserInfoError(Exception):
