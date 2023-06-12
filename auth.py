@@ -1,7 +1,12 @@
 import requests
+import json
 from bs4 import BeautifulSoup
 import logging
 import re
+
+
+class MissingUserInfoError(Exception):
+    ...
 
 
 class UnsuccessfulLoginError(Exception):
@@ -14,8 +19,10 @@ class NoIframeFoundError(Exception):
 
 class LoginClient:
     def __init__(self, email: str, password: str):
+        self.logged_in_page = None
         self._logger = logging.getLogger(self.__class__.__name__)
-
+        if not email or not password:
+            raise MissingUserInfoError("User not valid or found")
         self.session = requests.session()
         self.links = {
              "init_url": "https://www.lernsax.de",
@@ -23,6 +30,13 @@ class LoginClient:
 
         self.email = email
         self.password = password
+
+    @classmethod
+    def from_creds(cls, identifier):
+        with open("creds.json", "r") as f:
+            creds = json.load(f)
+        user = creds.get(identifier, {})
+        return cls(user.get("username", ""), user.get("password", ""))
 
     def get_site_visit_redirect_url(self):
         self._logger.info(" -> Visiting https://www.lernsax.de/ and retrieving redirect url...")
@@ -67,6 +81,7 @@ class LoginClient:
 
         self._logger.info(f" * Successfully logged in as {self.email!r}")
 
+        self.logged_in_page = r
         return r
 
     def login(self) -> requests.Response:
@@ -80,5 +95,6 @@ class LoginClient:
 
 if __name__ == "__main__":
     logging.basicConfig(level="INFO")
-    c = LoginClient(email="<your email>", password="<your password>")
+    #c = LoginClient(email="<your email>", password="<your password>")
+    c = LoginClient.from_creds("zas")
     c.login()
