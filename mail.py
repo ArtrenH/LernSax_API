@@ -1,8 +1,10 @@
 import json
+import os
 import requests
+import logging
 from tqdm import tqdm
 from bs4 import BeautifulSoup
-import logging
+from urllib.parse import urlparse, parse_qs
 
 from auth import LoginClient
 
@@ -18,7 +20,7 @@ class Mail:
         self.subject = kwargs.get("subject")
         self.date = kwargs.get("date")
         self.content = kwargs.get("content")
-        self.attachments = kwargs.get("attachments")
+        self.attachments = kwargs.get("attachments", [])
         self.read_status = kwargs.get("read_status")
         self.read_link = kwargs.get("read_link")
         self.size = kwargs.get("size")
@@ -29,7 +31,7 @@ class Mail:
 
     def add_info(self, **kwargs):
         self.content = kwargs.get("content")
-        self.attachments = kwargs.get("attachments")
+        self.attachments = kwargs.get("attachments", [])
 
     def to_json(self) -> dict:
         return {
@@ -58,6 +60,14 @@ class LernSaxMailClient:
         self.mail_links: list[str] = []
         self.mail_pages: list[str] = []
         self.mails: list[Mail] = []
+
+        self.attachments_folder = f"{self.auth_client.downloads_folder}/mail_attachments"
+        os.makedirs(self.attachments_folder, exist_ok=True)
+
+    def load_mails_from_json(self):
+        with open(f"{self.auth_client.downloads_folder}/mails.json", "r") as f:
+            mail_json = json.load(f)
+        self.mails = [Mail(**elem) for elem in mail_json]
 
     # get link to mail page from base page
     def get_mail_link(self):
@@ -125,13 +135,11 @@ class LernSaxMailClient:
         return self.mail_pages
 
     def get_all_mails(self):
+        self._logger.info(" -> getting information for all mails")
+
         self.get_all_mail_pages()
         for page in self.mail_pages:
             self.parse_mail_page(mail_page_text=page)
-
-    def parse_all_mails(self):
-        for mail in tqdm(self.mails):
-            self.parse_mail(mail)
 
     # get a mail html by url
     def get_mail(self, mail: Mail):
@@ -154,9 +162,33 @@ class LernSaxMailClient:
         }
         if len(tr) != 5:
             mail_data["attachments"] = [
-                [att.find("a")["href"], att.find_all("a")[-1].text.strip()] for att in tr[-2].find_all("div")[:-1]
+                att.find("a")["href"] for att in tr[-2].find_all("div")[:-1]
+            ]
+            mail_data["attachments"] = [
+                parse_qs(urlparse(url).query).get("path")[0] for url in mail_data["attachments"]
             ]
         mail.add_info(**mail_data)
+
+    def parse_all_mails(self):
+        self._logger.info(" -> downloading all mails")
+
+        for mail in tqdm(self.mails):
+            self.parse_mail(mail)
+
+    def download_attachment(self, path: str):
+        r = self.session.get(f"https://d.lernsax.de/download.php?path={path}")
+        path = f"{self.attachments_folder}{path}"
+        os.makedirs(os.path.dirname(path))
+        with open(path, "wb") as f:
+            f.write(r.content)
+
+    def dump_mails(self):
+        mails = render_mail_list(self.mails)
+        with open(f"{self.auth_client.downloads_folder}/mails.json", "w+") as f:
+            json.dump(mails, f, indent=4, ensure_ascii=False)
+        for mail in tqdm(self.mails):
+            for attachment in mail.attachments:
+                self.download_attachment(attachment)
 
     # send a mail
     def send_mail(self, receiver: list[str], cc: list[str] = None, bcc: list[str] = None, **kwargs):
@@ -191,12 +223,6 @@ class LernSaxMailClient:
         }
         self.session.post("https://www.lernsax.de" + refresh_link, data=payload)
 
-    def download_attachment(self, attachment_url: str):
-        r = self.session.get(attachment_url)
-        with open("test.pdf", "wb") as f:
-            f.write(r.content)
-        print(r.status_code)
-
     # FOLDER HANDLING
     # MASSIV REFACTORING NEEDED
     def find_mail_folders(self):
@@ -220,15 +246,12 @@ if __name__ == "__main__":
     auth = LoginClient.from_creds("zas")
     auth.login()
     client = LernSaxMailClient(auth)
+
     client.get_mail_link()
     client.get_initial_page()
-    attachment_link = ""
-    #o = parse_qs(urlparse(attachment_link).query)
-    #print(o.get("path"))
-    client.download_attachment("")
-    #client.get_all_mails()
-    #client.parse_all_mails()
-    with open("mails.json", "w+") as f:
-        json.dump(render_mail_list(client.mails), f, indent=4, ensure_ascii=False)
+    client.get_all_mails()
+    client.parse_all_mails()
+    #client.load_mails_from_json()
+    client.dump_mails()
 
     # client.send_mail(receiver="lorenz.marc@wog.lernsax.de", subject=f"test{i}", body="test")

@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import logging
 import re
-from urllib.parse import urlparse, parse_qs
+import os
 
 
 class MissingUserInfoError(Exception):
@@ -31,6 +31,9 @@ class LoginClient:
 
         self.email = email
         self.password = password
+
+        self.downloads_folder = f"data/{self.email.split('@')[0]}"
+        os.makedirs(self.downloads_folder, exist_ok=True)
 
     @classmethod
     def from_creds(cls, identifier):
@@ -96,6 +99,6 @@ class LoginClient:
 
 if __name__ == "__main__":
     logging.basicConfig(level="INFO")
-    #c = LoginClient(email="<your email>", password="<your password>")
+    # c = LoginClient(email="<your email>", password="<your password>")
     c = LoginClient.from_creds("zas")
     c.login()
