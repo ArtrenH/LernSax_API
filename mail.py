@@ -58,7 +58,7 @@ def render_mail_list(mails: list[Mail]):
     return [mail.to_json() for mail in mails]
 
 
-class LernSaxMailClient:
+class WebMailClient:
     def __init__(self, auth_client: LoginClient):
         self.auth_client: LoginClient = auth_client
         self._logger = logging.getLogger(self.__class__.__name__)
@@ -67,9 +67,10 @@ class LernSaxMailClient:
         self.mail_links: list[str] = []
         self.mail_pages: list[str] = []
         self.mails: list[Mail] = []
-        self.folders: dict = []
+        self.folders: dict = {}
 
-        self.attachments_folder = f"{self.auth_client.downloads_folder}/mail_attachments"
+        self.os_folder = f"{self.auth_client.downloads_folder}/mail/inbox"
+        self.attachments_folder = f"{self.os_folder}/attachments"
         os.makedirs(self.attachments_folder, exist_ok=True)
 
     # loading mails from file
@@ -118,9 +119,11 @@ class LernSaxMailClient:
 
         soup = BeautifulSoup(self.mail_pages[0], features="html.parser")
         c = soup.find("p", {"class": "pages"})
+        if not c:
+            self.mail_links = []
+            return self.mail_links
         c = c.find_all("a")
         self.mail_links = [[x["href"], x.text.strip()] for x in c if x.text.strip()]
-        print(len(self.mail_links))
         return self.mail_links
 
     # crawl html of other mail pages
@@ -146,6 +149,8 @@ class LernSaxMailClient:
     def parse_mail_page(self, mail_page_text: str):
         soup = BeautifulSoup(mail_page_text, features="html.parser")
         c = soup.find("div", {"class": "jail_table"})
+        if not c:
+            return self.mails
         mails_html = c.find("tbody").find_all("tr")
         for mail in mails_html:
             # structure: [flagged_status, answered_status, read_status]
@@ -167,14 +172,13 @@ class LernSaxMailClient:
                 "subject": mail.find("td", {"class": "c_subj"}).find("a").text.strip(),
                 "author_name": author_part.find("span").text.strip() if author_part else "",
                 "author_address": author_part.find("span")["title"] if author_part else "",
-                "recipient_name": recipient_part.find("span").text.strip(),
-                "recipient_address": recipient_part.find("span")["title"],
+                "recipient_name": recipient_part.find("span").text.strip() if recipient_part else "",
+                "recipient_address": recipient_part.find("span")["title"] if recipient_part else "",
                 "size": mail.find("td", {"class": "c_size"}).text.strip(),
                 "date": mail.find("td", {"class": "c_date"}).text.strip(),
                 "number": mail.find("td", {"class": "c_cb"}).find("input")["name"].split("[")[1].split("]")[0],
                 "content": None,
             }))
-            # TIMESTAMPS; NUMBERS MISSING!!!
         return self.mails
 
     def parse_all_mails(self):
@@ -194,28 +198,30 @@ class LernSaxMailClient:
             "recipient": [span["title"] for span in tr[2].find_all("span")],
             "subject": tr[3].find("td", {"class", "data"}).text.strip(),
             "eml_link": tr[-1].find("a")["href"],
-            "content": str(soup.find("p", {"class": "panel"})).replace("<br/>", "\n")
+            "content": str(soup.find("p", {"class": "panel"})).replace("<br/>", "\n"),
+            "attachments": [],
         }
         if len(tr) != 5:
             mail_data["attachments"] = [
                 att.find("a")["href"] for att in tr[-2].find_all("div")[:-1]
             ]
             mail_data["attachments"] = [
-                parse_qs(urlparse(url).query).get("path")[0] for url in mail_data["attachments"]
+                parse_qs(urlparse(url).query).get("path")[0] for url in mail_data["attachments"] if url != "#"
             ]
         mail.add_info(**mail_data)
 
     # DOWNLOAD HANDLING
     def download_attachment(self, path: str):
         r = self.session.get(f"https://d.lernsax.de/download.php?path={path}")
-        path = f"{self.attachments_folder}{path}"
+        # first number in path is random and useless for storage
+        path = f"{self.attachments_folder}/{'/'.join(path.split('/', 2)[2:])}"
         os.makedirs(os.path.dirname(path))
         with open(path, "wb") as f:
             f.write(r.content)
 
     def dump_mails(self):
         mails = render_mail_list(self.mails)
-        with open(f"{self.auth_client.downloads_folder}/mails.json", "w+") as f:
+        with open(f"{self.os_folder}/mails.json", "w+") as f:
             json.dump(mails, f, indent=4, ensure_ascii=False)
         for mail in tqdm(self.mails):
             for attachment in mail.attachments:
@@ -256,7 +262,7 @@ class LernSaxMailClient:
 
     # FOLDER HANDLING
     def find_mail_folders(self):
-        print(f"finding mail folders for {self.auth_client.email}")
+        self._logger.info(" -> finding mail folders")
         self.get_initial_page()
         mail_soup = BeautifulSoup(self.mail_pages[0], features="html.parser")
         folder_dropdown = mail_soup.find("select", {"name": "select_folder"})
@@ -269,8 +275,28 @@ class LernSaxMailClient:
         }
 
     def switch_mail_folder(self, folder: str):
+        self._logger.info(f" -> switching to mail folder {folder!r}")
+
         self.initial_mail_link = self.folders[folder]["url"]
         self.get_initial_page()
+
+        self.os_folder = f"{self.auth_client.downloads_folder}/mail/{folder}"
+        self.attachments_folder = f"{self.os_folder}/attachments"
+        os.makedirs(self.attachments_folder, exist_ok=True)
+
+    # download EVERYTHING
+    def download_everything(self):
+        self._logger.info(" -> downloading EVERYTHING")
+        self.get_mail_link()
+        self.get_initial_page()
+        self.find_mail_folders()
+        for cur_folder in self.folders:
+            self._logger.info(f" -> downloading folder {cur_folder}")
+            self.switch_mail_folder(cur_folder)
+            self.get_all_mail_pages()
+            self.parse_all_mail_pages()
+            self.parse_all_mails()
+            self.dump_mails()
 
 
 if __name__ == "__main__":
@@ -278,18 +304,7 @@ if __name__ == "__main__":
 
     auth = LoginClient.from_creds("zas")
     auth.login()
-    client = LernSaxMailClient(auth)
-    # client.load_mails_from_json()
+    self = WebMailClient(auth)
+    self.download_everything()
 
-    client.get_mail_link()
-    client.get_initial_page()
-    client.find_mail_folders()
-    client.switch_mail_folder("sent")
-
-    client.get_all_mail_pages()
-    client.parse_all_mail_pages()
-    # client.parse_all_mail()
-    print(client.mails)
-    # client.dump_mails()
-
-    # client.send_mail(receiver="lorenz.marc@wog.lernsax.de", subject=f"test{i}", body="test")
+    # client.send_mail(receiver="", subject=f"test", body="test")
